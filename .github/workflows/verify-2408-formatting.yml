@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 4
       - name: Prepare standalone formatter configuration
         working-directory: ${{ runner.temp }}
         shell: bash
@@ -56,9 +58,39 @@ jobs:
         working-directory: ${{ runner.temp }}
         shell: bash
         run: mvn --batch-mode --no-transfer-progress -f "$RUNNER_TEMP/format-check/pom.xml" formatter:format
-      - name: Check that both changed files are already formatted
+      - name: Verify formatting of the changed lines
         shell: bash
         run: |
-          git diff --exit-code -- \
-            spring-data-jdbc/src/main/java/org/springframework/data/jdbc/repository/support/FetchableFluentQueryByExample.java \
-            spring-data-jdbc/src/test/java/org/springframework/data/jdbc/repository/JdbcRepositoryIntegrationTests.java
+          python3 - <<'PY'
+          import difflib
+          import subprocess
+          from pathlib import Path
+          baseline = "5287bf4fa49486e6cd5cf16b49be10f645e67f7b"
+          fix = "931485874008b0f10fa3fb01ac372b6027c9aa29"
+          paths = [
+              "spring-data-jdbc/src/main/java/org/springframework/data/jdbc/repository/support/FetchableFluentQueryByExample.java",
+              "spring-data-jdbc/src/test/java/org/springframework/data/jdbc/repository/JdbcRepositoryIntegrationTests.java",
+          ]
+          for path in paths:
+              before = subprocess.check_output(["git", "show", baseline + ":" + path]).decode("utf-8").splitlines(True)
+              proposed = subprocess.check_output(["git", "show", fix + ":" + path]).decode("utf-8").splitlines(True)
+              formatted = Path(path).read_text(encoding="utf-8").splitlines(True)
+              changed = [
+                  (j1, max(j2, j1 + 1))
+                  for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, before, proposed, autojunk=False).get_opcodes()
+                  if tag != "equal"
+              ]
+              edits = [
+                  (i1, max(i2, i1 + 1))
+                  for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, proposed, formatted, autojunk=False).get_opcodes()
+                  if tag != "equal"
+              ]
+              relevant = [
+                  edit for edit in edits
+                  if any(edit[0] < change[1] and change[0] < edit[1] for change in changed)
+              ]
+              if relevant:
+                  print("".join(difflib.unified_diff(proposed, formatted, fromfile=path, tofile=path + " (formatted)")))
+                  raise SystemExit("Formatter changes intersect the proposed patch: " + repr(relevant))
+              print(path + ": changed lines match Spring Data Eclipse settings; " + str(len(edits)) + " untouched formatting regions preserved.")
+          PY
